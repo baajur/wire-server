@@ -565,6 +565,7 @@ specListUsers = describe "GET /Users" $ do
   context "1 SAML IdP" $ do
     it "finds a SCIM-provisioned user by userName or externalId" $ testFindProvisionedUser
     it "finds a non-SCIM-provisioned user by userName or externalId" $ testFindNonProvisionedUser
+    it "finds a non-SCIM-provisioned user by userName or externalId with email" $ testFindNonProvisionedUserMigratedWithEmailInTeamWithSSO
   context "0 SAML IdP" $ do
     it "finds a SCIM-provisioned user by userName or externalId" $ testFindProvisionedUserNoIdP
     it "finds a non-SCIM-provisioned user by userName or externalId" $ testFindNonProvisionedUserNoIdP
@@ -614,6 +615,32 @@ testFindNonProvisionedUser = do
   users' <- listUsers tok (Just (filterBy "externalId" externalId))
   liftIO $ (scimUserId <$> users') `shouldContain` [member]
 
+-- The user is migrated by using the email as the externalId
+testFindNonProvisionedUserMigratedWithEmailInTeamWithSSO :: HasCallStack => TestSpar ()
+testFindNonProvisionedUserMigratedWithEmailInTeamWithSSO = do
+  env <- ask
+  (owner, teamid, idp, (_, privCreds)) <- registerTestIdPWithMeta
+  memberWithSSO <- loginSsoUserFirstTime idp privCreds
+  -- NOTE: once SCIM is enabled SSO Auto-provisioning is disabled
+  tok <- registerScimToken teamid (Just (idp ^. SAML.idpId))
+  handle <- nextHandle
+  runSpar $ Intra.setBrigUserHandle memberWithSSO handle
+  Just brigUser <- runSpar $ Intra.getBrigUser memberWithSSO
+  liftIO $ userManagedBy brigUser `shouldBe` ManagedByWire
+  let externalId = either error id $ Intra.userToExternalId brigUser
+  users <- listUsers tok (Just (filterBy "externalId" externalId))
+  liftIO $ (scimUserId <$> users) `shouldContain` [memberWithSSO]
+  Just brigUser' <- runSpar $ Intra.getBrigUser memberWithSSO
+  liftIO $ userManagedBy brigUser' `shouldBe` ManagedByScim
+
+  memberInvited <- userId <$> call (inviteAndRegisterUser (env ^. teBrig) owner teamid)
+  Just brigUserInvited <- runSpar $ Intra.getBrigUser memberInvited
+  let emailInvited = maybe (error "must have email") fromEmail (userEmail brigUserInvited)
+  users' <- listUsers tok (Just (filterBy "externalId" emailInvited))
+  liftIO $ (scimUserId <$> users') `shouldContain` [memberInvited]
+  Just brigUserInvited' <- runSpar $ Intra.getBrigUser memberInvited
+  liftIO $ userManagedBy brigUserInvited' `shouldBe` ManagedByScim
+
 testFindProvisionedUserNoIdP :: TestSpar ()
 testFindProvisionedUserNoIdP = do
   -- covered in 'testCreateUserNoIdP' (as of Mon 31 Aug 2020 08:37:05 PM CEST)
@@ -636,10 +663,10 @@ testFindNonProvisionedUserNoIdP = do
     liftIO $ userManagedBy brigUser `shouldBe` ManagedByWire
     liftIO $ userEmail brigUser `shouldSatisfy` isJust
 
-  byHandle <- listUsers tok (Just (filterBy "userName" (fromHandle handle)))
   byExternalId <- listUsers tok (Just (filterBy "externalId" (fromEmail email)))
+  byHandle <- listUsers tok (Just (filterBy "userName" (fromHandle handle)))
 
-  for_ [byHandle, byExternalId] $ \users -> do
+  for_ [byExternalId, byHandle] $ \users -> do
     liftIO $ (scimUserId <$> users) `shouldBe` [uid]
     Just brigUser' <- runSpar $ Intra.getBrigUser uid
     liftIO $ userManagedBy brigUser' `shouldBe` ManagedByScim
